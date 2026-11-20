@@ -1,0 +1,309 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile with role and active workspace preference.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": {
+          "type": "string",
+          "enum": ["Administrator", "Business Owner", "Finance Manager", "Business Analyst", "Read-Only User"]
+        },
+        "activeBusinessId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "Business": {
+      "title": "Business",
+      "description": "SME or startup business profile with Indian statutory and financial year metadata.",
+      "type": "object",
+      "properties": {
+        "businessName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "businessType": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "industry": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "registrationNumber": { "type": "string", "maxLength": 64 },
+        "gstin": { "type": "string", "maxLength": 20 },
+        "pan": { "type": "string", "maxLength": 16 },
+        "address": { "type": "string", "maxLength": 300 },
+        "state": { "type": "string", "maxLength": 80 },
+        "city": { "type": "string", "maxLength": 80 },
+        "contactPerson": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 254 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "financialYear": { "type": "string", "minLength": 4, "maxLength": 24 },
+        "defaultCurrency": { "type": "string", "enum": ["INR", "USD", "EUR", "GBP"] },
+        "logoText": { "type": "string", "maxLength": 16 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessName", "businessType", "industry", "financialYear", "defaultCurrency", "ownerId", "createdAt", "updatedAt"]
+    },
+    "BusinessMember": {
+      "title": "BusinessMember",
+      "description": "Role-based access mapping linking a user to a business.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": {
+          "type": "string",
+          "enum": ["Business Owner", "Finance Manager", "Business Analyst", "Read-Only User"]
+        },
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "businessId", "ownerId", "createdAt", "updatedAt"]
+    },
+    "Dataset": {
+      "title": "Dataset",
+      "description": "Uploaded Excel/CSV dataset registry and validation summary.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "dataType": {
+          "type": "string",
+          "enum": ["Transactions", "Sales", "Purchases", "Expenses", "Customers", "Inventory"]
+        },
+        "rowCount": { "type": "integer" },
+        "validRows": { "type": "integer" },
+        "errorCount": { "type": "integer" },
+        "processingStatus": {
+          "type": "string",
+          "enum": ["Validated", "Imported", "Needs Review"]
+        },
+        "validationSummary": { "type": "string", "maxLength": 1000 },
+        "uploadedBy": { "type": "string", "maxLength": 254 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "fileName", "dataType", "rowCount", "validRows", "errorCount", "processingStatus", "createdAt", "updatedAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Income or Expense financial transaction record.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["Income", "Expense"] },
+        "date": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "invoiceNumber": { "type": "string", "maxLength": 64 },
+        "productOrService": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 500 },
+        "amount": { "type": "number" },
+        "gstAmount": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["Paid", "Pending", "Overdue", "Partial"] },
+        "paymentMethod": { "type": "string", "maxLength": 60 },
+        "createdBy": { "type": "string", "maxLength": 254 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "type", "date", "partyName", "category", "department", "amount", "gstAmount", "paymentStatus", "paymentMethod", "createdAt", "updatedAt"]
+    },
+    "LedgerAccount": {
+      "title": "LedgerAccount",
+      "description": "Classified chart of accounts entry for Balance Sheet, P&L, and Cash Flow Statement.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 24 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "accountGroup": {
+          "type": "string",
+          "enum": ["Current Asset", "Non-Current Asset", "Current Liability", "Non-Current Liability", "Equity", "COGS", "Operating Expense", "Depreciation", "Interest", "Tax", "Investing Cash Flow", "Financing Cash Flow"]
+        },
+        "balance": { "type": "number" },
+        "previousBalance": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "code", "name", "accountGroup", "balance", "previousBalance", "createdAt", "updatedAt"]
+    },
+    "Budget": {
+      "title": "Budget",
+      "description": "Monthly and departmental budget targets for Budget vs Actual comparison.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "month": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "financialYear": { "type": "string", "minLength": 4, "maxLength": 24 },
+        "department": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "budgetType": { "type": "string", "enum": ["Revenue", "Expense"] },
+        "targetAmount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "month", "financialYear", "department", "category", "budgetType", "targetAmount", "createdAt", "updatedAt"]
+    },
+    "Risk": {
+      "title": "Risk",
+      "description": "Enterprise risk register entry with probability/impact scoring.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": {
+          "type": "string",
+          "enum": ["Financial Risk", "Liquidity Risk", "Operational Risk", "Credit Risk", "Market Risk", "Business Risk"]
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "probability": { "type": "integer" },
+        "impact": { "type": "integer" },
+        "financialImpact": { "type": "number" },
+        "riskScore": { "type": "integer" },
+        "riskLevel": { "type": "string", "enum": ["Low", "Medium", "High", "Critical"] },
+        "mitigationStrategy": { "type": "string", "maxLength": 600 },
+        "responsiblePerson": { "type": "string", "maxLength": 120 },
+        "reviewDate": { "type": "string", "maxLength": 32 },
+        "status": { "type": "string", "enum": ["Open", "Mitigating", "Monitored", "Closed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "category", "description", "probability", "impact", "financialImpact", "riskScore", "riskLevel", "status", "createdAt", "updatedAt"]
+    },
+    "AIInsight": {
+      "title": "AIInsight",
+      "description": "Saved financial interpretation or management recommendation.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "analyticsType": {
+          "type": "string",
+          "enum": ["Descriptive", "Diagnostic", "Predictive", "Prescriptive"]
+        },
+        "relatedMetric": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "observation": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "explanation": { "type": "string", "minLength": 1, "maxLength": 1200 },
+        "suggestedAction": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "confidenceLevel": { "type": "string", "enum": ["High", "Moderate", "Preliminary"] },
+        "source": { "type": "string", "enum": ["AI-Generated", "Rule-Based"] },
+        "status": { "type": "string", "enum": ["New", "Reviewed", "Actioned"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "analyticsType", "relatedMetric", "observation", "explanation", "suggestedAction", "confidenceLevel", "source", "status", "createdAt", "updatedAt"]
+    },
+    "CustomerParty": {
+      "title": "CustomerParty",
+      "description": "Customer or Vendor directory record.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "partyType": { "type": "string", "enum": ["Customer", "Vendor"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "gstin": { "type": "string", "maxLength": 20 },
+        "email": { "type": "string", "maxLength": 254 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "city": { "type": "string", "maxLength": 80 },
+        "paymentTermsDays": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "partyType", "name", "paymentTermsDays", "createdAt", "updatedAt"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "SaaS subscription plan record for a business or user.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "planName": { "type": "string", "enum": ["Freemium", "Premium"] },
+        "monthlyPrice": { "type": "number" },
+        "startDate": { "type": "string", "maxLength": 32 },
+        "expiryDate": { "type": "string", "maxLength": 32 },
+        "paymentStatus": { "type": "string", "enum": ["Free Tier", "Pending Gateway", "Active Manual", "Expired"] },
+        "renewalStatus": { "type": "string", "enum": ["Auto-Renew", "Manual", "Cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "planName", "monthlyPrice", "startDate", "expiryDate", "paymentStatus", "renewalStatus", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable activity audit trail.",
+      "type": "object",
+      "properties": {
+        "businessId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorEmail": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "entityType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "entityId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["businessId", "ownerId", "actorUid", "actorEmail", "action", "entityType", "entityId", "summary", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User authentication profile and role preferences."
+    },
+    "/businesses/{businessId}": {
+      "schema": { "$ref": "#/entities/Business" },
+      "description": "Business profile master records."
+    },
+    "/businesses/{businessId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/BusinessMember" },
+      "description": "Business-level RBAC access records."
+    },
+    "/businesses/{businessId}/datasets/{datasetId}": {
+      "schema": { "$ref": "#/entities/Dataset" },
+      "description": "Uploaded Excel/CSV dataset registry."
+    },
+    "/businesses/{businessId}/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Income and expense financial transactions."
+    },
+    "/businesses/{businessId}/accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/LedgerAccount" },
+      "description": "Classified chart of accounts for financial statements."
+    },
+    "/businesses/{businessId}/budgets/{budgetId}": {
+      "schema": { "$ref": "#/entities/Budget" },
+      "description": "Department and monthly budget targets."
+    },
+    "/businesses/{businessId}/risks/{riskId}": {
+      "schema": { "$ref": "#/entities/Risk" },
+      "description": "Business risk register entries."
+    },
+    "/businesses/{businessId}/aiInsights/{insightId}": {
+      "schema": { "$ref": "#/entities/AIInsight" },
+      "description": "AI and rule-based financial analytics insights."
+    },
+    "/businesses/{businessId}/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/CustomerParty" },
+      "description": "Customers and vendors directory."
+    },
+    "/businesses/{businessId}/subscriptions/{subscriptionId}": {
+      "schema": { "$ref": "#/entities/Subscription" },
+      "description": "Subscription plans and billing metadata."
+    },
+    "/businesses/{businessId}/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable financial and operational audit logs."
+    }
+  }
+}

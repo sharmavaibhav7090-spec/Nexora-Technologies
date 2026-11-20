@@ -1,0 +1,551 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Hardened Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdminEmail() {
+      return isVerified() && request.auth.token.email == 'sharmavaibhav7090@gmail.com';
+    }
+
+    function isAdmin() {
+      return isAdminEmail() || (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isParentBusinessOwner(businessId) {
+      return exists(/databases/$(database)/documents/businesses/$(businessId)) &&
+        get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId == request.auth.uid;
+    }
+
+    function isBusinessMember(businessId) {
+      return exists(/databases/$(database)/documents/businesses/$(businessId)/members/$(request.auth.uid));
+    }
+
+    function getMemberRole(businessId) {
+      return get(/databases/$(database)/documents/businesses/$(businessId)/members/$(request.auth.uid)).data.role;
+    }
+
+    function canWriteBusinessFinance(businessId) {
+      return isParentBusinessOwner(businessId) || (
+        isBusinessMember(businessId) &&
+        getMemberRole(businessId) in ['Business Owner', 'Finance Manager']
+      );
+    }
+
+    function canReadBusiness(businessId) {
+      return isParentBusinessOwner(businessId) || isBusinessMember(businessId) || isAdmin();
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'activeBusinessId', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['Administrator', 'Business Owner', 'Finance Manager', 'Business Analyst', 'Read-Only User'] &&
+        (!('activeBusinessId' in data) || (data.activeBusinessId is string && data.activeBusinessId.size() <= 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBusiness(data) {
+      return data.keys().hasAll(['businessName', 'businessType', 'industry', 'financialYear', 'defaultCurrency', 'ownerId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'businessName', 'businessType', 'industry', 'registrationNumber', 'gstin', 'pan',
+          'address', 'state', 'city', 'contactPerson', 'email', 'phone',
+          'financialYear', 'defaultCurrency', 'logoText', 'ownerId', 'createdAt', 'updatedAt'
+        ]) &&
+        data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 160 &&
+        data.businessType is string && data.businessType.size() >= 1 && data.businessType.size() <= 80 &&
+        data.industry is string && data.industry.size() >= 1 && data.industry.size() <= 80 &&
+        (!('registrationNumber' in data) || (data.registrationNumber is string && data.registrationNumber.size() <= 64)) &&
+        (!('gstin' in data) || (data.gstin is string && data.gstin.size() <= 20)) &&
+        (!('pan' in data) || (data.pan is string && data.pan.size() <= 16)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('state' in data) || (data.state is string && data.state.size() <= 80)) &&
+        (!('city' in data) || (data.city is string && data.city.size() <= 80)) &&
+        (!('contactPerson' in data) || (data.contactPerson is string && data.contactPerson.size() <= 120)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 254)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 32)) &&
+        data.financialYear is string && data.financialYear.size() >= 4 && data.financialYear.size() <= 24 &&
+        data.defaultCurrency in ['INR', 'USD', 'EUR', 'GBP'] &&
+        (!('logoText' in data) || (data.logoText is string && data.logoText.size() <= 16)) &&
+        isValidId(data.ownerId) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBusinessMember(data, businessId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'businessId', 'ownerId', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'businessId', 'ownerId', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['Business Owner', 'Finance Manager', 'Business Analyst', 'Read-Only User'] &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDataset(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'fileName', 'dataType', 'rowCount', 'validRows', 'errorCount', 'processingStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'fileName', 'dataType', 'rowCount', 'validRows', 'errorCount', 'processingStatus', 'validationSummary', 'uploadedBy', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 200 &&
+        data.dataType in ['Transactions', 'Sales', 'Purchases', 'Expenses', 'Customers', 'Inventory'] &&
+        data.rowCount is int && data.rowCount >= 0 &&
+        data.validRows is int && data.validRows >= 0 &&
+        data.errorCount is int && data.errorCount >= 0 &&
+        data.processingStatus in ['Validated', 'Imported', 'Needs Review'] &&
+        (!('validationSummary' in data) || (data.validationSummary is string && data.validationSummary.size() <= 1000)) &&
+        (!('uploadedBy' in data) || (data.uploadedBy is string && data.uploadedBy.size() <= 254)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'type', 'date', 'partyName', 'category', 'department', 'amount', 'gstAmount', 'paymentStatus', 'paymentMethod', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'type', 'date', 'partyName', 'category', 'department', 'invoiceNumber', 'productOrService', 'description', 'amount', 'gstAmount', 'paymentStatus', 'paymentMethod', 'createdBy', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.type in ['Income', 'Expense'] &&
+        data.date is string && data.date.size() >= 8 && data.date.size() <= 32 &&
+        data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 160 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 80 &&
+        data.department is string && data.department.size() >= 1 && data.department.size() <= 80 &&
+        (!('invoiceNumber' in data) || (data.invoiceNumber is string && data.invoiceNumber.size() <= 64)) &&
+        (!('productOrService' in data) || (data.productOrService is string && data.productOrService.size() <= 120)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+        (data.amount is int || data.amount is float) && data.amount >= 0 &&
+        (data.gstAmount is int || data.gstAmount is float) && data.gstAmount >= 0 &&
+        data.paymentStatus in ['Paid', 'Pending', 'Overdue', 'Partial'] &&
+        data.paymentMethod is string && data.paymentMethod.size() >= 1 && data.paymentMethod.size() <= 60 &&
+        (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 254)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAccount(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'code', 'name', 'accountGroup', 'balance', 'previousBalance', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'code', 'name', 'accountGroup', 'balance', 'previousBalance', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 24 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.accountGroup in ['Current Asset', 'Non-Current Asset', 'Current Liability', 'Non-Current Liability', 'Equity', 'COGS', 'Operating Expense', 'Depreciation', 'Interest', 'Tax', 'Investing Cash Flow', 'Financing Cash Flow'] &&
+        (data.balance is int || data.balance is float) &&
+        (data.previousBalance is int || data.previousBalance is float) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBudget(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'month', 'financialYear', 'department', 'category', 'budgetType', 'targetAmount', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'month', 'financialYear', 'department', 'category', 'budgetType', 'targetAmount', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.month is string && data.month.size() >= 3 && data.month.size() <= 20 &&
+        data.financialYear is string && data.financialYear.size() >= 4 && data.financialYear.size() <= 24 &&
+        data.department is string && data.department.size() >= 1 && data.department.size() <= 80 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 80 &&
+        data.budgetType in ['Revenue', 'Expense'] &&
+        (data.targetAmount is int || data.targetAmount is float) && data.targetAmount >= 0 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRisk(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'category', 'description', 'probability', 'impact', 'financialImpact', 'riskScore', 'riskLevel', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'category', 'description', 'probability', 'impact', 'financialImpact', 'riskScore', 'riskLevel', 'mitigationStrategy', 'responsiblePerson', 'reviewDate', 'status', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.category in ['Financial Risk', 'Liquidity Risk', 'Operational Risk', 'Credit Risk', 'Market Risk', 'Business Risk'] &&
+        data.description is string && data.description.size() >= 1 && data.description.size() <= 600 &&
+        data.probability is int && data.probability >= 1 && data.probability <= 5 &&
+        data.impact is int && data.impact >= 1 && data.impact <= 5 &&
+        (data.financialImpact is int || data.financialImpact is float) && data.financialImpact >= 0 &&
+        data.riskScore is int && data.riskScore >= 1 && data.riskScore <= 25 &&
+        data.riskLevel in ['Low', 'Medium', 'High', 'Critical'] &&
+        (!('mitigationStrategy' in data) || (data.mitigationStrategy is string && data.mitigationStrategy.size() <= 600)) &&
+        (!('responsiblePerson' in data) || (data.responsiblePerson is string && data.responsiblePerson.size() <= 120)) &&
+        (!('reviewDate' in data) || (data.reviewDate is string && data.reviewDate.size() <= 32)) &&
+        data.status in ['Open', 'Mitigating', 'Monitored', 'Closed'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAIInsight(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'analyticsType', 'relatedMetric', 'observation', 'explanation', 'suggestedAction', 'confidenceLevel', 'source', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'analyticsType', 'relatedMetric', 'observation', 'explanation', 'suggestedAction', 'confidenceLevel', 'source', 'status', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.analyticsType in ['Descriptive', 'Diagnostic', 'Predictive', 'Prescriptive'] &&
+        data.relatedMetric is string && data.relatedMetric.size() >= 1 && data.relatedMetric.size() <= 120 &&
+        data.observation is string && data.observation.size() >= 1 && data.observation.size() <= 800 &&
+        data.explanation is string && data.explanation.size() >= 1 && data.explanation.size() <= 1200 &&
+        data.suggestedAction is string && data.suggestedAction.size() >= 1 && data.suggestedAction.size() <= 800 &&
+        data.confidenceLevel in ['High', 'Moderate', 'Preliminary'] &&
+        data.source in ['AI-Generated', 'Rule-Based'] &&
+        data.status in ['New', 'Reviewed', 'Actioned'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCustomerParty(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'partyType', 'name', 'paymentTermsDays', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'partyType', 'name', 'gstin', 'email', 'phone', 'city', 'paymentTermsDays', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.partyType in ['Customer', 'Vendor'] &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        (!('gstin' in data) || (data.gstin is string && data.gstin.size() <= 20)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 254)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 32)) &&
+        (!('city' in data) || (data.city is string && data.city.size() <= 80)) &&
+        data.paymentTermsDays is int && data.paymentTermsDays >= 0 && data.paymentTermsDays <= 365 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSubscription(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'planName', 'monthlyPrice', 'startDate', 'expiryDate', 'paymentStatus', 'renewalStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'planName', 'monthlyPrice', 'startDate', 'expiryDate', 'paymentStatus', 'renewalStatus', 'createdAt', 'updatedAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        data.planName in ['Freemium', 'Premium'] &&
+        (data.monthlyPrice is int || data.monthlyPrice is float) && data.monthlyPrice >= 0 &&
+        data.startDate is string && data.startDate.size() >= 4 && data.startDate.size() <= 32 &&
+        data.expiryDate is string && data.expiryDate.size() >= 4 && data.expiryDate.size() <= 32 &&
+        data.paymentStatus in ['Free Tier', 'Pending Gateway', 'Active Manual', 'Expired'] &&
+        data.renewalStatus in ['Auto-Renew', 'Manual', 'Cancelled'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data, businessId) {
+      return data.keys().hasAll(['businessId', 'ownerId', 'actorUid', 'actorEmail', 'action', 'entityType', 'entityId', 'summary', 'createdAt']) &&
+        data.keys().hasOnly(['businessId', 'ownerId', 'actorUid', 'actorEmail', 'action', 'entityType', 'entityId', 'summary', 'createdAt']) &&
+        data.businessId == businessId &&
+        isValidId(data.ownerId) &&
+        isValidId(data.actorUid) &&
+        data.actorEmail is string && data.actorEmail.size() >= 3 && data.actorEmail.size() <= 254 &&
+        data.action is string && data.action.size() >= 1 && data.action.size() <= 80 &&
+        data.entityType is string && data.entityType.size() >= 1 && data.entityType.size() <= 64 &&
+        data.entityId is string && data.entityId.size() >= 1 && data.entityId.size() <= 128 &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 500 &&
+        data.createdAt is timestamp;
+    }
+
+    // --- Collection Match Rules ---
+
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdminEmail();
+      allow create, update, delete: if isAdminEmail();
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdminEmail();
+      allow create: if isVerified() && isValidId(userId) && isOwner(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().role == 'Business Owner' || isAdminEmail());
+      allow update: if isVerified() && isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'activeBusinessId', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    match /businesses/{businessId} {
+      allow get: if isValidId(businessId) && isSignedIn() && (resource == null || existing().ownerId == request.auth.uid || isAdmin() || isBusinessMember(businessId));
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+      allow create: if isVerified() && isValidId(businessId) &&
+        isValidBusiness(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() && isValidId(businessId) &&
+        isValidBusiness(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'businessName', 'businessType', 'industry', 'registrationNumber', 'gstin', 'pan',
+              'address', 'state', 'city', 'contactPerson', 'email', 'phone',
+              'financialYear', 'defaultCurrency', 'logoText', 'updatedAt'
+            ]))
+        );
+      allow delete: if isVerified() && isValidId(businessId) && (existing().ownerId == request.auth.uid || isAdmin());
+
+      // Business Members (RBAC Subcollection)
+      match /members/{memberId} {
+        allow get: if isValidId(businessId) && isValidId(memberId) && isSignedIn() && (resource == null || canReadBusiness(businessId) || isOwner(memberId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || resource.data.uid == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(memberId) &&
+          isValidBusinessMember(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isParentBusinessOwner(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(memberId) &&
+          isValidBusinessMember(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().uid == existing().uid &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (isParentBusinessOwner(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['role', 'displayName', 'updatedAt']))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(memberId) && (isParentBusinessOwner(businessId) || isAdmin());
+      }
+
+      // Datasets Registry
+      match /datasets/{datasetId} {
+        allow get: if isValidId(businessId) && isValidId(datasetId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(datasetId) &&
+          isValidDataset(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canWriteBusinessFinance(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(datasetId) &&
+          isValidDataset(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canWriteBusinessFinance(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['processingStatus', 'validationSummary', 'validRows', 'errorCount', 'updatedAt']))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(datasetId) && (isParentBusinessOwner(businessId) || isAdmin());
+      }
+
+      // Financial Transactions
+      match /transactions/{transactionId} {
+        allow get: if isValidId(businessId) && isValidId(transactionId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(transactionId) &&
+          isValidTransaction(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canWriteBusinessFinance(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(transactionId) &&
+          isValidTransaction(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canWriteBusinessFinance(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'type', 'date', 'partyName', 'category', 'department', 'invoiceNumber',
+                'productOrService', 'description', 'amount', 'gstAmount', 'paymentStatus', 'paymentMethod', 'updatedAt'
+              ]))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(transactionId) && (canWriteBusinessFinance(businessId) || isAdmin());
+      }
+
+      // Classified Ledger Accounts
+      match /accounts/{accountId} {
+        allow get: if isValidId(businessId) && isValidId(accountId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(accountId) &&
+          isValidAccount(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canWriteBusinessFinance(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(accountId) &&
+          isValidAccount(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canWriteBusinessFinance(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['code', 'name', 'accountGroup', 'balance', 'previousBalance', 'updatedAt']))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(accountId) && (isParentBusinessOwner(businessId) || isAdmin());
+      }
+
+      // Budgets
+      match /budgets/{budgetId} {
+        allow get: if isValidId(businessId) && isValidId(budgetId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(budgetId) &&
+          isValidBudget(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canWriteBusinessFinance(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(budgetId) &&
+          isValidBudget(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canWriteBusinessFinance(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['month', 'financialYear', 'department', 'category', 'budgetType', 'targetAmount', 'updatedAt']))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(budgetId) && (canWriteBusinessFinance(businessId) || isAdmin());
+      }
+
+      // Risk Register
+      match /risks/{riskId} {
+        allow get: if isValidId(businessId) && isValidId(riskId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(riskId) &&
+          isValidRisk(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canWriteBusinessFinance(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(riskId) &&
+          isValidRisk(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canWriteBusinessFinance(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'category', 'description', 'probability', 'impact', 'financialImpact',
+                'riskScore', 'riskLevel', 'mitigationStrategy', 'responsiblePerson', 'reviewDate', 'status', 'updatedAt'
+              ]))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(riskId) && (canWriteBusinessFinance(businessId) || isAdmin());
+      }
+
+      // AI & Rule-Based Insights
+      match /aiInsights/{insightId} {
+        allow get: if isValidId(businessId) && isValidId(insightId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(insightId) &&
+          isValidAIInsight(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canReadBusiness(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(insightId) &&
+          isValidAIInsight(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canReadBusiness(businessId) && existing().status != 'Actioned' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(insightId) && (isParentBusinessOwner(businessId) || isAdmin());
+      }
+
+      // Customers & Vendors
+      match /customers/{customerId} {
+        allow get: if isValidId(businessId) && isValidId(customerId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(customerId) &&
+          isValidCustomerParty(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (canWriteBusinessFinance(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(customerId) &&
+          isValidCustomerParty(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (canWriteBusinessFinance(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['partyType', 'name', 'gstin', 'email', 'phone', 'city', 'paymentTermsDays', 'updatedAt']))
+          );
+        allow delete: if isVerified() && isValidId(businessId) && isValidId(customerId) && (canWriteBusinessFinance(businessId) || isAdmin());
+      }
+
+      // Subscriptions
+      match /subscriptions/{subscriptionId} {
+        allow get: if isValidId(businessId) && isValidId(subscriptionId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(subscriptionId) &&
+          isValidSubscription(incoming(), businessId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isParentBusinessOwner(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update: if isVerified() && isValidId(businessId) && isValidId(subscriptionId) &&
+          isValidSubscription(incoming(), businessId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().businessId == existing().businessId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (isParentBusinessOwner(businessId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['planName', 'monthlyPrice', 'startDate', 'expiryDate', 'paymentStatus', 'renewalStatus', 'updatedAt']))
+          );
+        allow delete: if isAdmin() && isValidId(businessId) && isValidId(subscriptionId);
+      }
+
+      // Immutable Audit Logs
+      match /auditLogs/{logId} {
+        allow get: if isValidId(businessId) && isValidId(logId) && isSignedIn() && (resource == null || canReadBusiness(businessId));
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdminEmail());
+        allow create: if isVerified() && isValidId(businessId) && isValidId(logId) &&
+          isValidAuditLog(incoming(), businessId) &&
+          incoming().actorUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          (canReadBusiness(businessId) || isAdmin()) &&
+          incoming().ownerId == get(/databases/$(database)/documents/businesses/$(businessId)).data.ownerId;
+        allow update, delete: if false;
+      }
+    }
+  }
+}
