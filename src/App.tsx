@@ -1,16 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
+import { getRedirectResult, onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import {
   BarChart3,
   Briefcase,
   Building2,
   Calculator,
+  CheckCircle2,
+  Copy,
   CreditCard,
   Database,
   FileSpreadsheet,
   FileText,
   Landmark,
   LayoutDashboard,
+  Loader2,
   LogOut,
   Menu,
   PieChart,
@@ -23,7 +26,15 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { auth, googleProvider, isGoogleAuthenticated } from './firebase';
+import {
+  auth,
+  authPersistenceReady,
+  createGoogleAuthProvider,
+  firebaseMetadata,
+  isGoogleAuthenticated,
+  mapFirebaseAuthError,
+  MappedAuthError,
+} from './firebase';
 import {
   AIInsightRecord,
   AuditLogRecord,
@@ -98,10 +109,14 @@ const NAV_ITEMS: { id: NavModuleId; label: string; group: string; icon: React.FC
 
 function NexoraWorkspace() {
   const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authErrorDetail, setAuthErrorDetail] = useState<MappedAuthError | null>(null);
+  const [copiedHostname, setCopiedHostname] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [loginSuccessBanner, setLoginSuccessBanner] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<'signin' | 'register'>('signin');
   const [regEmail, setRegEmail] = useState('');
   const [regFullName, setRegFullName] = useState('');
@@ -115,6 +130,7 @@ function NexoraWorkspace() {
     organizationName: string;
   } | null>(null);
   const recordedUidRef = useRef<string | null>(null);
+  const authSyncInFlightRef = useRef<boolean>(false);
 
   const [registeredUsers, setRegisteredUsers] = useState<UserProfile[]>([]);
   const [emailRegistrations, setEmailRegistrations] = useState<EmailRegistration[]>([]);
@@ -152,88 +168,137 @@ function NexoraWorkspace() {
   });
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (!firebaseUser) {
-        recordedUidRef.current = null;
-        setUser(null);
-        setUserProfile(null);
-        setNeedsRegistrationCompletion(false);
-        setRegisteredUsers([]);
-        setEmailRegistrations([]);
-        setLoginLogs([]);
-        setBusinesses([]);
-        setBusinessesLoaded(false);
-        setActiveBusinessId('');
-        setAuthReady(true);
-        return;
-      }
+    let active = true;
+    let unsub: (() => void) | undefined;
 
-      // Enforce Google Account Authentication Only
-      if (!isGoogleAuthenticated(firebaseUser) || !firebaseUser.email) {
-        pendingRegistrationRef.current = null;
-        await signOut(auth);
-        setAuthError('Only verified Google Account logins are permitted on Nexora Technologies.');
-        setAuthReady(true);
-        return;
-      }
-
-      const normalizedGoogleEmail = firebaseUser.email.trim().toLowerCase();
-      const pendingReg = pendingRegistrationRef.current;
-
-      if (pendingReg && pendingReg.expectedEmail !== normalizedGoogleEmail) {
-        pendingRegistrationRef.current = null;
-        await signOut(auth);
-        setAuthError(
-          `Selected Google account (${normalizedGoogleEmail}) does not match the email ID you entered (${pendingReg.expectedEmail}). Please sign in with the matching Google account.`
-        );
-        setAuthReady(true);
-        return;
-      }
-
-      setUser(firebaseUser);
-
+    (async () => {
+      await authPersistenceReady;
       try {
-        if (pendingReg) {
-          pendingRegistrationRef.current = null;
-          recordedUidRef.current = firebaseUser.uid;
-          const prof = await registerAndRecordGoogleLogin(firebaseUser, {
-            fullName: pendingReg.fullName,
-            organizationName: pendingReg.organizationName,
-          });
-          setUserProfile(prof);
-          setNeedsRegistrationCompletion(false);
-          if (prof.activeBusinessId) {
-            setActiveBusinessId(prof.activeBusinessId);
-          }
-        } else {
-          const existingProfile = await getUserProfile(firebaseUser.uid);
-          const preReg = await findEmailRegistration(normalizedGoogleEmail);
-
-          if (!existingProfile && !preReg && normalizedGoogleEmail !== ADMIN_EMAIL) {
-            // Require explicit email registration confirmation before entering workspace
-            setRegFullName(firebaseUser.displayName || normalizedGoogleEmail.split('@')[0]);
-            setNeedsRegistrationCompletion(true);
-            setUserProfile(null);
-          } else if (recordedUidRef.current !== firebaseUser.uid) {
-            recordedUidRef.current = firebaseUser.uid;
-            const prof = await registerAndRecordGoogleLogin(firebaseUser);
-            setUserProfile(prof);
-            setNeedsRegistrationCompletion(false);
-            if (prof.activeBusinessId) {
-              setActiveBusinessId(prof.activeBusinessId);
-            }
-          } else if (existingProfile) {
-            setUserProfile(existingProfile);
-            setNeedsRegistrationCompletion(false);
-          }
+        await getRedirectResult(auth);
+      } catch (redirectErr) {
+        if (active) {
+          const mapped = mapFirebaseAuthError(redirectErr);
+          setAuthError(mapped.userMessage);
+          setAuthErrorDetail(mapped);
         }
-      } catch (err) {
-        setAuthError(err instanceof Error ? err.message : 'Unable to verify Google registration profile.');
       }
 
-      setAuthReady(true);
-    });
-    return () => unsub();
+      if (!active) return;
+
+      unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (!active) return;
+
+        if (!firebaseUser) {
+          recordedUidRef.current = null;
+          authSyncInFlightRef.current = false;
+          setUser(null);
+          setUserProfile(null);
+          setNeedsRegistrationCompletion(false);
+          setLoginSuccessBanner(null);
+          setRegisteredUsers([]);
+          setEmailRegistrations([]);
+          setLoginLogs([]);
+          setBusinesses([]);
+          setBusinessesLoaded(false);
+          setActiveBusinessId('');
+          setAuthReady(true);
+          return;
+        }
+
+        // Enforce verified Google Account authentication only
+        if (!isGoogleAuthenticated(firebaseUser) || !firebaseUser.email) {
+          pendingRegistrationRef.current = null;
+          await signOut(auth);
+          setAuthError(
+            'Only verified Google Account logins are permitted on Nexora Technologies. Please sign in with a verified Google account.'
+          );
+          setAuthErrorDetail(null);
+          setAuthReady(true);
+          return;
+        }
+
+        const normalizedGoogleEmail = firebaseUser.email.trim().toLowerCase();
+        const pendingReg = pendingRegistrationRef.current;
+
+        if (pendingReg && pendingReg.expectedEmail !== normalizedGoogleEmail) {
+          pendingRegistrationRef.current = null;
+          await signOut(auth);
+          setAuthError(
+            `Selected Google account (${normalizedGoogleEmail}) does not match the email ID you entered (${pendingReg.expectedEmail}). Please select the matching Google account.`
+          );
+          setAuthErrorDetail(null);
+          setAuthReady(true);
+          return;
+        }
+
+        setUser(firebaseUser);
+
+        if (authSyncInFlightRef.current) {
+          setAuthReady(true);
+          return;
+        }
+        authSyncInFlightRef.current = true;
+
+        try {
+          if (pendingReg) {
+            pendingRegistrationRef.current = null;
+            recordedUidRef.current = firebaseUser.uid;
+            const { profile, isNewRegistration } = await registerAndRecordGoogleLogin(firebaseUser, {
+              fullName: pendingReg.fullName,
+              organizationName: pendingReg.organizationName,
+            });
+            setUserProfile(profile);
+            setNeedsRegistrationCompletion(false);
+            setLoginSuccessBanner(
+              isNewRegistration
+                ? `Email ID ${profile.email} registered and verified with Google. Welcome to Nexora Technologies.`
+                : `Welcome back, ${profile.displayName}. Your email ID (${profile.email}) is already registered — signed in with Google.`
+            );
+            if (profile.activeBusinessId) {
+              setActiveBusinessId(profile.activeBusinessId);
+            }
+          } else {
+            const existingProfile = await getUserProfile(firebaseUser.uid);
+            const preReg = await findEmailRegistration(normalizedGoogleEmail);
+
+            if (!existingProfile && !preReg && normalizedGoogleEmail !== ADMIN_EMAIL) {
+              setRegFullName(firebaseUser.displayName || normalizedGoogleEmail.split('@')[0]);
+              setNeedsRegistrationCompletion(true);
+              setUserProfile(null);
+            } else if (recordedUidRef.current !== firebaseUser.uid) {
+              recordedUidRef.current = firebaseUser.uid;
+              const { profile, isNewRegistration } = await registerAndRecordGoogleLogin(firebaseUser);
+              setUserProfile(profile);
+              setNeedsRegistrationCompletion(false);
+              setLoginSuccessBanner(
+                isNewRegistration
+                  ? `Email ID ${profile.email} activated and Google sign-in recorded.`
+                  : `Signed in with Google as ${profile.email}. Login recorded.`
+              );
+              if (profile.activeBusinessId) {
+                setActiveBusinessId(profile.activeBusinessId);
+              }
+            } else if (existingProfile) {
+              setUserProfile(existingProfile);
+              setNeedsRegistrationCompletion(false);
+            }
+          }
+        } catch (err) {
+          const mapped = mapFirebaseAuthError(err);
+          setAuthError(mapped.userMessage);
+          setAuthErrorDetail(mapped);
+        } finally {
+          authSyncInFlightRef.current = false;
+        }
+
+        setAuthReady(true);
+      });
+    })();
+
+    return () => {
+      active = false;
+      if (unsub) unsub();
+    };
   }, []);
 
   const isPlatformAdmin = (user?.email || '').trim().toLowerCase() === ADMIN_EMAIL;
@@ -324,23 +389,33 @@ function NexoraWorkspace() {
   const canManageAdmin = effectiveRole === 'Administrator' || effectiveRole === 'Business Owner';
 
   const handleSignIn = async () => {
+    if (authBusy) return;
+    setAuthBusy(true);
     setAuthError(null);
+    setAuthErrorDetail(null);
     setAuthNotice(null);
     pendingRegistrationRef.current = null;
-    googleProvider.setCustomParameters({ prompt: 'select_account' });
     try {
-      await signInWithPopup(auth, googleProvider);
+      await authPersistenceReady;
+      const provider = createGoogleAuthProvider();
+      await signInWithPopup(auth, provider);
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Google sign-in was cancelled or failed.');
+      const mapped = mapFirebaseAuthError(err);
+      setAuthError(mapped.userMessage);
+      setAuthErrorDetail(mapped);
+    } finally {
+      setAuthBusy(false);
     }
   };
 
   const handleRegisterAndGoogleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (authBusy) return;
     setAuthError(null);
+    setAuthErrorDetail(null);
     setAuthNotice(null);
     const normalizedEmail = regEmail.trim().toLowerCase();
-    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+    if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       setAuthError('Please enter a valid Google or Google Workspace email ID.');
       return;
     }
@@ -349,45 +424,78 @@ function NexoraWorkspace() {
       return;
     }
 
+    setAuthBusy(true);
     pendingRegistrationRef.current = {
       expectedEmail: normalizedEmail,
       fullName: regFullName.trim(),
       organizationName: regOrgName.trim(),
     };
-    googleProvider.setCustomParameters({
-      prompt: 'select_account',
-      login_hint: normalizedEmail,
-    });
 
     try {
-      await signInWithPopup(auth, googleProvider);
-      setAuthNotice(`Registered ${normalizedEmail} and recorded login.`);
+      await authPersistenceReady;
+      const provider = createGoogleAuthProvider(normalizedEmail);
+      await signInWithPopup(auth, provider);
     } catch (err) {
       pendingRegistrationRef.current = null;
-      setAuthError(err instanceof Error ? err.message : 'Google account verification cancelled or failed.');
+      const mapped = mapFirebaseAuthError(err);
+      setAuthError(mapped.userMessage);
+      setAuthErrorDetail(mapped);
+    } finally {
+      setAuthBusy(false);
     }
   };
 
   const handleCompleteRegistration = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user) return;
+    if (!user || completingRegistration) return;
+    if (!regFullName.trim()) {
+      setAuthError('Please enter your full name to complete registration.');
+      return;
+    }
     setCompletingRegistration(true);
     setAuthError(null);
+    setAuthErrorDetail(null);
     try {
       recordedUidRef.current = user.uid;
-      const prof = await registerAndRecordGoogleLogin(user, {
+      const { profile } = await registerAndRecordGoogleLogin(user, {
         fullName: regFullName.trim() || user.displayName || undefined,
         organizationName: regOrgName.trim() || undefined,
       });
-      setUserProfile(prof);
+      setUserProfile(profile);
       setNeedsRegistrationCompletion(false);
-      if (prof.activeBusinessId) {
-        setActiveBusinessId(prof.activeBusinessId);
+      setLoginSuccessBanner(
+        `Email ID ${profile.email} registered and verified with Google. Welcome to Nexora Technologies.`
+      );
+      if (profile.activeBusinessId) {
+        setActiveBusinessId(profile.activeBusinessId);
       }
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Failed to complete email registration.');
+      const mapped = mapFirebaseAuthError(err);
+      setAuthError(mapped.userMessage);
+      setAuthErrorDetail(mapped);
     } finally {
       setCompletingRegistration(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    pendingRegistrationRef.current = null;
+    recordedUidRef.current = null;
+    setPreviewRole(null);
+    setLoginSuccessBanner(null);
+    setAuthError(null);
+    setAuthErrorDetail(null);
+    await signOut(auth);
+    setAuthNotice('You have signed out securely from Nexora Technologies.');
+  };
+
+  const handleCopyHostname = async (hostname: string) => {
+    try {
+      await navigator.clipboard.writeText(hostname);
+      setCopiedHostname(true);
+      setTimeout(() => setCopiedHostname(false), 2500);
+    } catch {
+      // Clipboard API unavailable
     }
   };
 
@@ -447,7 +555,7 @@ function NexoraWorkspace() {
   if (!user) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
-        <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between gap-8">
+        <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between gap-4 sm:gap-8">
           <div className="text-lg font-bold tracking-tight text-[#0B1B3B] whitespace-nowrap shrink-0">
             Nexora Technologies
           </div>
@@ -460,17 +568,24 @@ function NexoraWorkspace() {
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => setAuthMode('register')}
-              className="px-3.5 py-2 text-xs font-medium text-slate-700 border border-slate-200 bg-white rounded-md hover:bg-slate-50 whitespace-nowrap shrink-0"
+              disabled={authBusy}
+              onClick={() => {
+                setAuthMode('register');
+                setAuthError(null);
+                setAuthErrorDetail(null);
+              }}
+              className="hidden sm:inline-flex px-3.5 py-2 text-xs font-medium text-slate-700 border border-slate-200 bg-white rounded-md hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
             >
               Register Email ID
             </button>
             <button
               type="button"
+              disabled={authBusy}
               onClick={handleSignIn}
-              className="px-4 py-2 text-xs font-medium text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] whitespace-nowrap shrink-0"
+              className="px-4 py-2 text-xs font-medium text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
-              Sign In with Google
+              {authBusy && authMode === 'signin' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              <span>Sign In with Google</span>
             </button>
           </div>
         </header>
@@ -519,11 +634,13 @@ function NexoraWorkspace() {
             <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md">
               <button
                 type="button"
+                disabled={authBusy}
                 onClick={() => {
                   setAuthMode('signin');
                   setAuthError(null);
+                  setAuthErrorDetail(null);
                 }}
-                className={`flex-1 py-2 text-xs font-semibold rounded-xs transition-colors ${
+                className={`flex-1 py-2 text-xs font-semibold rounded-xs transition-colors disabled:opacity-60 ${
                   authMode === 'signin' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
@@ -531,11 +648,13 @@ function NexoraWorkspace() {
               </button>
               <button
                 type="button"
+                disabled={authBusy}
                 onClick={() => {
                   setAuthMode('register');
                   setAuthError(null);
+                  setAuthErrorDetail(null);
                 }}
-                className={`flex-1 py-2 text-xs font-semibold rounded-xs transition-colors ${
+                className={`flex-1 py-2 text-xs font-semibold rounded-xs transition-colors disabled:opacity-60 ${
                   authMode === 'register' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
@@ -544,8 +663,27 @@ function NexoraWorkspace() {
             </div>
 
             {authError && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-md text-xs text-red-800">
-                {authError}
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-md text-xs text-red-900 space-y-2">
+                <div>{authError}</div>
+                {authErrorDetail?.isUnauthorizedDomain && (
+                  <div className="pt-2 border-t border-red-200/80 space-y-1.5 text-[11px] text-red-800">
+                    <div className="font-semibold">Firebase Console Configuration Required:</div>
+                    <div className="flex items-center justify-between gap-2 bg-white border border-red-200 rounded px-2.5 py-1.5">
+                      <span className="font-mono truncate">{authErrorDetail.currentHostname}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyHostname(authErrorDetail.currentHostname)}
+                        className="inline-flex items-center gap-1 font-medium text-blue-700 hover:text-blue-900 shrink-0"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>{copiedHostname ? 'Copied' : 'Copy Host'}</span>
+                      </button>
+                    </div>
+                    <div>
+                      Project <span className="font-mono">{firebaseMetadata.projectId}</span> → Authentication → Settings → Authorized domains → Add domain.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {authNotice && (
@@ -564,17 +702,30 @@ function NexoraWorkspace() {
                 </div>
                 <button
                   type="button"
+                  disabled={authBusy}
                   onClick={handleSignIn}
-                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 flex items-center justify-center gap-2 whitespace-nowrap"
+                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2 whitespace-nowrap"
                 >
-                  <span>Continue with Google Account</span>
+                  {authBusy ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Connecting to Google Account...</span>
+                    </>
+                  ) : (
+                    <span>Continue with Google Account</span>
+                  )}
                 </button>
                 <div className="pt-2 border-t border-slate-100 text-xs text-slate-600 flex items-center justify-between">
                   <span>First time visiting Nexora?</span>
                   <button
                     type="button"
-                    onClick={() => setAuthMode('register')}
-                    className="font-semibold text-blue-700 hover:text-blue-800"
+                    disabled={authBusy}
+                    onClick={() => {
+                      setAuthMode('register');
+                      setAuthError(null);
+                      setAuthErrorDetail(null);
+                    }}
+                    className="font-semibold text-blue-700 hover:text-blue-800 disabled:opacity-50"
                   >
                     Register Email ID
                   </button>
@@ -597,10 +748,11 @@ function NexoraWorkspace() {
                   <input
                     type="email"
                     required
+                    disabled={authBusy}
                     value={regEmail}
                     onChange={(e) => setRegEmail(e.target.value)}
                     placeholder="name@company.com or name@gmail.com"
-                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600"
+                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600 disabled:bg-slate-50"
                   />
                 </label>
 
@@ -609,10 +761,11 @@ function NexoraWorkspace() {
                   <input
                     type="text"
                     required
+                    disabled={authBusy}
                     value={regFullName}
                     onChange={(e) => setRegFullName(e.target.value)}
                     placeholder="e.g. Aarav Sharma"
-                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600"
+                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600 disabled:bg-slate-50"
                   />
                 </label>
 
@@ -620,18 +773,27 @@ function NexoraWorkspace() {
                   <span className="font-medium text-slate-700">Company / Organization (Optional)</span>
                   <input
                     type="text"
+                    disabled={authBusy}
                     value={regOrgName}
                     onChange={(e) => setRegOrgName(e.target.value)}
                     placeholder="e.g. Precision Components Pvt. Ltd."
-                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600"
+                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600 disabled:bg-slate-50"
                   />
                 </label>
 
                 <button
                   type="submit"
-                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] whitespace-nowrap"
+                  disabled={authBusy}
+                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2 whitespace-nowrap"
                 >
-                  Register Email & Verify with Google
+                  {authBusy ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Verifying with Google...</span>
+                    </>
+                  ) : (
+                    <span>Register Email & Verify with Google</span>
+                  )}
                 </button>
               </form>
             )}
@@ -662,7 +824,7 @@ function NexoraWorkspace() {
             </div>
             <button
               type="button"
-              onClick={() => signOut(auth)}
+              onClick={handleSignOut}
               className="text-xs text-slate-500 hover:text-slate-800 whitespace-nowrap shrink-0"
             >
               Switch Account
@@ -694,9 +856,10 @@ function NexoraWorkspace() {
             <input
               type="text"
               required
+              disabled={completingRegistration}
               value={regFullName}
               onChange={(e) => setRegFullName(e.target.value)}
-              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md"
+              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md disabled:bg-slate-50"
             />
           </label>
 
@@ -704,19 +867,23 @@ function NexoraWorkspace() {
             <span className="font-medium text-slate-700">Company / Organization (Optional)</span>
             <input
               type="text"
+              disabled={completingRegistration}
               value={regOrgName}
               onChange={(e) => setRegOrgName(e.target.value)}
               placeholder="e.g. Acme India Pvt. Ltd."
-              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md"
+              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md disabled:bg-slate-50"
             />
           </label>
 
           <button
             type="submit"
             disabled={completingRegistration}
-            className="w-full py-2.5 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 disabled:opacity-50"
+            className="w-full py-2.5 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 disabled:opacity-60 flex items-center justify-center gap-2"
           >
-            {completingRegistration ? 'Registering Email & Recording Login...' : 'Register Email ID & Enter Workspace'}
+            {completingRegistration && <Loader2 className="w-4 h-4 animate-spin" />}
+            <span>
+              {completingRegistration ? 'Registering Email & Recording Login...' : 'Register Email ID & Enter Workspace'}
+            </span>
           </button>
         </form>
       </div>
@@ -725,8 +892,9 @@ function NexoraWorkspace() {
 
   if (!businessesLoaded) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-xs text-slate-600">
-        Loading authorized business workspaces...
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-xs text-slate-600 gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-blue-700" />
+        <span>Loading authorized business workspaces...</span>
       </div>
     );
   }
@@ -735,6 +903,21 @@ function NexoraWorkspace() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
         <div className="max-w-2xl w-full bg-white border border-slate-200 rounded-lg p-8 space-y-6">
+          {loginSuccessBanner && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md text-xs text-emerald-900 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span>{loginSuccessBanner}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLoginSuccessBanner(null)}
+                className="text-emerald-700 hover:text-emerald-950 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           <div className="flex items-center justify-between border-b border-slate-100 pb-4">
             <div>
               <h1 className="text-lg font-bold text-slate-900">Welcome to Nexora Technologies</h1>
@@ -744,7 +927,7 @@ function NexoraWorkspace() {
             </div>
             <button
               type="button"
-              onClick={() => signOut(auth)}
+              onClick={handleSignOut}
               className="text-xs text-slate-500 hover:text-slate-800"
             >
               Sign Out
@@ -870,7 +1053,7 @@ function NexoraWorkspace() {
           </div>
           <button
             type="button"
-            onClick={() => signOut(auth)}
+            onClick={handleSignOut}
             className="mt-1 w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-slate-300 hover:bg-white/10 hover:text-white"
           >
             <LogOut className="w-3.5 h-3.5" /> Sign Out
@@ -919,6 +1102,22 @@ function NexoraWorkspace() {
             </button>
           </div>
         </header>
+
+        {loginSuccessBanner && (
+          <div className="bg-emerald-50 border-b border-emerald-200 px-6 py-2 text-xs text-emerald-900 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              <span>{loginSuccessBanner}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLoginSuccessBanner(null)}
+              className="text-emerald-700 hover:text-emerald-950 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {!canWrite && (
           <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 text-xs text-amber-900">

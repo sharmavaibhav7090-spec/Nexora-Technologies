@@ -90,7 +90,7 @@ async function appendLoginLog(
 export async function registerAndRecordGoogleLogin(
   user: User,
   options?: { fullName?: string; organizationName?: string }
-): Promise<UserProfile> {
+): Promise<{ profile: UserProfile; isNewRegistration: boolean }> {
   if (!isGoogleAuthenticated(user) || !user.email) {
     throw new Error('Only verified Google Account authentication is permitted.');
   }
@@ -166,7 +166,7 @@ export async function registerAndRecordGoogleLogin(
       await appendLoginLog(user, resolvedName, role, 'LOGIN');
 
       const refreshed = await getDoc(ref);
-      return refreshed.data() as UserProfile;
+      return { profile: refreshed.data() as UserProfile, isNewRegistration: false };
     }
 
     // First-time registration via Google Account
@@ -228,8 +228,11 @@ export async function registerAndRecordGoogleLogin(
     await appendLoginLog(user, resolvedName, role, 'REGISTRATION');
 
     const createdSnap = await getDoc(ref);
-    return createdSnap.data() as UserProfile;
+    return { profile: createdSnap.data() as UserProfile, isNewRegistration: true };
   } catch (error) {
+    if (error instanceof Error && error.message.includes('currently suspended')) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
