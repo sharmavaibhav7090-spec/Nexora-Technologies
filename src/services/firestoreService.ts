@@ -3,6 +3,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -12,7 +13,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { User } from 'firebase/auth';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { db, handleFirestoreError, isGoogleAuthenticated, OperationType } from '../firebase';
 import {
   AIInsightRecord,
   AuditLogRecord,
@@ -20,7 +21,9 @@ import {
   BusinessProfile,
   CustomerParty,
   DatasetRecord,
+  EmailRegistration,
   LedgerAccount,
+  LoginLogRecord,
   RiskRecord,
   SubscriptionRecord,
   TransactionRecord,
@@ -29,40 +32,303 @@ import {
 } from '../types/nexora';
 import { getIndianSMESampleBundle } from '../utils/seedData';
 
+export const ADMIN_EMAIL = 'sharmavaibhav7090@gmail.com';
+
 function makeId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 10);
   return `${prefix}_${Date.now()}_${rand}`;
 }
 
-export async function ensureUserProfile(user: User): Promise<UserProfile> {
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  const path = `users/${uid}`;
+  try {
+    const snap = await getDoc(doc(db, 'users', uid));
+    if (!snap.exists()) return null;
+    return snap.data() as UserProfile;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
+}
+
+export async function findEmailRegistration(email: string): Promise<EmailRegistration | null> {
+  const normalized = email.trim().toLowerCase();
+  const path = 'emailRegistrations';
+  try {
+    const q = query(collection(db, path), where('email', '==', normalized));
+    const snap = await getDocs(q);
+    if (snap.empty) return null;
+    const d = snap.docs[0];
+    return { id: d.id, ...(d.data() as Omit<EmailRegistration, 'id'>) };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+async function appendLoginLog(
+  user: User,
+  displayName: string,
+  role: UserRole,
+  eventType: 'REGISTRATION' | 'LOGIN'
+): Promise<void> {
+  const logId = makeId('lgn');
+  const path = `loginLogs/${logId}`;
+  try {
+    await setDoc(doc(db, 'loginLogs', logId), {
+      uid: user.uid,
+      email: (user.email || '').trim().toLowerCase().slice(0, 254),
+      displayName: displayName.slice(0, 120),
+      authProvider: 'google.com',
+      eventType,
+      role,
+      loginAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function registerAndRecordGoogleLogin(
+  user: User,
+  options?: { fullName?: string; organizationName?: string }
+): Promise<UserProfile> {
+  if (!isGoogleAuthenticated(user) || !user.email) {
+    throw new Error('Only verified Google Account authentication is permitted.');
+  }
+
+  const normalizedEmail = user.email.trim().toLowerCase().slice(0, 254);
   const path = `users/${user.uid}`;
   const ref = doc(db, 'users', user.uid);
+
   try {
     const snap = await getDoc(ref);
+    const existingReg = await findEmailRegistration(normalizedEmail);
+
     if (snap.exists()) {
-      const data = snap.data() as UserProfile;
-      return data;
+      const existing = snap.data() as Partial<UserProfile>;
+      if (existing.registrationStatus === 'Suspended') {
+        throw new Error('This registered account is currently suspended. Contact an Administrator.');
+      }
+
+      const resolvedName = (
+        options?.fullName?.trim() ||
+        existing.displayName ||
+        user.displayName ||
+        normalizedEmail.split('@')[0]
+      ).slice(0, 120);
+      const role: UserRole =
+        normalizedEmail === ADMIN_EMAIL ? 'Administrator' : existing.role || 'Business Owner';
+
+      if (!existing.registeredAt) {
+        // Legacy profile upgrade to include Google login & registration tracking fields
+        await updateDoc(ref, {
+          authProvider: 'google.com',
+          registrationStatus: 'Registered',
+          organizationName: (options?.organizationName?.trim() || existing.organizationName || '').slice(0, 160),
+          registeredAt: existing.createdAt || serverTimestamp(),
+          lastLoginAt: serverTimestamp(),
+          loginCount: 1,
+          displayName: resolvedName,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await updateDoc(ref, {
+          lastLoginAt: serverTimestamp(),
+          loginCount: (existing.loginCount || 0) + 1,
+          displayName: resolvedName,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      if (!existingReg) {
+        const regId = makeId('reg');
+        await setDoc(doc(db, 'emailRegistrations', regId), {
+          email: normalizedEmail,
+          fullName: resolvedName,
+          organizationName: (options?.organizationName?.trim() || existing.organizationName || '').slice(0, 160),
+          assignedRole: role === 'Administrator' ? 'Business Owner' : role,
+          registeredByEmail: normalizedEmail,
+          registeredByUid: user.uid,
+          status: 'Activated',
+          activatedUid: user.uid,
+          activatedAt: serverTimestamp(),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } else if (existingReg.status === 'Pre-Registered') {
+        await updateDoc(doc(db, 'emailRegistrations', existingReg.id), {
+          status: 'Activated',
+          activatedUid: user.uid,
+          activatedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      await appendLoginLog(user, resolvedName, role, 'LOGIN');
+
+      const refreshed = await getDoc(ref);
+      return refreshed.data() as UserProfile;
     }
-    const isAdminUser = user.email === 'sharmavaibhav7090@gmail.com';
+
+    // First-time registration via Google Account
+    const isAdminUser = normalizedEmail === ADMIN_EMAIL;
     const role: UserRole = isAdminUser ? 'Administrator' : 'Business Owner';
-    const payload = {
+    const resolvedName = (
+      options?.fullName?.trim() ||
+      existingReg?.fullName ||
+      user.displayName ||
+      normalizedEmail.split('@')[0]
+    ).slice(0, 120);
+    const resolvedOrg = (
+      options?.organizationName?.trim() ||
+      existingReg?.organizationName ||
+      ''
+    ).slice(0, 160);
+
+    await setDoc(ref, {
       uid: user.uid,
-      email: (user.email || 'user@nexora.in').slice(0, 254),
-      displayName: (user.displayName || user.email?.split('@')[0] || 'Nexora User').slice(0, 120),
+      email: normalizedEmail,
+      displayName: resolvedName,
+      organizationName: resolvedOrg,
       role,
+      authProvider: 'google.com',
+      registrationStatus: 'Registered',
+      registeredAt: serverTimestamp(),
+      lastLoginAt: serverTimestamp(),
+      loginCount: 1,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    };
-    await setDoc(ref, payload);
-    return {
-      uid: payload.uid,
-      email: payload.email,
-      displayName: payload.displayName,
-      role,
-    };
+    });
+
+    if (existingReg) {
+      if (existingReg.status === 'Pre-Registered') {
+        await updateDoc(doc(db, 'emailRegistrations', existingReg.id), {
+          status: 'Activated',
+          activatedUid: user.uid,
+          activatedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } else {
+      const regId = makeId('reg');
+      await setDoc(doc(db, 'emailRegistrations', regId), {
+        email: normalizedEmail,
+        fullName: resolvedName,
+        organizationName: resolvedOrg,
+        assignedRole: 'Business Owner',
+        registeredByEmail: normalizedEmail,
+        registeredByUid: user.uid,
+        status: 'Activated',
+        activatedUid: user.uid,
+        activatedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await appendLoginLog(user, resolvedName, role, 'REGISTRATION');
+
+    const createdSnap = await getDoc(ref);
+    return createdSnap.data() as UserProfile;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
+}
+
+export async function adminRegisterEmail(
+  adminUser: User,
+  data: {
+    email: string;
+    fullName: string;
+    organizationName?: string;
+    assignedRole: Exclude<UserRole, 'Administrator'>;
+  }
+): Promise<void> {
+  const normalized = data.email.trim().toLowerCase().slice(0, 254);
+  const existing = await findEmailRegistration(normalized);
+  if (existing) {
+    throw new Error(`${normalized} is already registered in the site directory.`);
+  }
+  const id = makeId('reg');
+  const path = `emailRegistrations/${id}`;
+  try {
+    await setDoc(doc(db, 'emailRegistrations', id), {
+      email: normalized,
+      fullName: data.fullName.trim().slice(0, 120),
+      organizationName: (data.organizationName || '').trim().slice(0, 160),
+      assignedRole: data.assignedRole,
+      registeredByEmail: (adminUser.email || ADMIN_EMAIL).trim().toLowerCase().slice(0, 254),
+      registeredByUid: adminUser.uid,
+      status: 'Pre-Registered',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeRegisteredUsers(
+  user: User,
+  isAdmin: boolean,
+  onData: (users: UserProfile[]) => void
+): () => void {
+  const path = 'users';
+  const q = isAdmin
+    ? query(collection(db, path))
+    : query(collection(db, path), where('uid', '==', user.uid));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs.map((d) => d.data() as UserProfile);
+      onData(items);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, path)
+  );
+}
+
+export function subscribeEmailRegistrations(
+  user: User,
+  isAdmin: boolean,
+  onData: (regs: EmailRegistration[]) => void
+): () => void {
+  const path = 'emailRegistrations';
+  const normalizedEmail = (user.email || '').trim().toLowerCase();
+  const q = isAdmin
+    ? query(collection(db, path))
+    : query(collection(db, path), where('email', '==', normalizedEmail));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items: EmailRegistration[] = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<EmailRegistration, 'id'>),
+      }));
+      onData(items);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, path)
+  );
+}
+
+export function subscribeLoginLogs(
+  user: User,
+  isAdmin: boolean,
+  onData: (logs: LoginLogRecord[]) => void
+): () => void {
+  const path = 'loginLogs';
+  const q = isAdmin
+    ? query(collection(db, path))
+    : query(collection(db, path), where('uid', '==', user.uid));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items: LoginLogRecord[] = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<LoginLogRecord, 'id'>),
+      }));
+      onData(items);
+    },
+    (error) => handleFirestoreError(error, OperationType.LIST, path)
+  );
 }
 
 export async function updateUserActiveBusiness(uid: string, activeBusinessId: string): Promise<void> {

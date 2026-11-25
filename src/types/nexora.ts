@@ -38,8 +38,42 @@ export interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
+  organizationName?: string;
   role: UserRole;
+  authProvider: 'google.com';
+  registrationStatus: 'Registered' | 'Suspended';
+  registeredAt?: unknown;
+  lastLoginAt?: unknown;
+  loginCount: number;
   activeBusinessId?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface EmailRegistration {
+  id: string;
+  email: string;
+  fullName: string;
+  organizationName?: string;
+  assignedRole: Exclude<UserRole, 'Administrator'>;
+  registeredByEmail: string;
+  registeredByUid: string;
+  status: 'Pre-Registered' | 'Activated';
+  activatedUid?: string;
+  activatedAt?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface LoginLogRecord {
+  id: string;
+  uid: string;
+  email: string;
+  displayName: string;
+  authProvider: 'google.com';
+  eventType: 'REGISTRATION' | 'LOGIN';
+  role: UserRole;
+  loginAt?: unknown;
 }
 
 export interface BusinessProfile {

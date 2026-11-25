@@ -2,21 +2,88 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Authenticated user profile with role and active workspace preference.",
+      "description": "Google-authenticated user profile with registration status, role, login counter, and active workspace preference.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "minLength": 3, "maxLength": 254 },
         "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "organizationName": { "type": "string", "maxLength": 160 },
         "role": {
           "type": "string",
           "enum": ["Administrator", "Business Owner", "Finance Manager", "Business Analyst", "Read-Only User"]
         },
+        "authProvider": { "type": "string", "enum": ["google.com"] },
+        "registrationStatus": { "type": "string", "enum": ["Registered", "Suspended"] },
+        "registeredAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" },
+        "loginCount": { "type": "integer" },
         "activeBusinessId": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "role",
+        "authProvider",
+        "registrationStatus",
+        "registeredAt",
+        "lastLoginAt",
+        "loginCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmailRegistration": {
+      "title": "EmailRegistration",
+      "description": "Email ID registration registry allowing users and admins to register Google emails for Nexora access.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "organizationName": { "type": "string", "maxLength": 160 },
+        "assignedRole": {
+          "type": "string",
+          "enum": ["Business Owner", "Finance Manager", "Business Analyst", "Read-Only User"]
+        },
+        "registeredByEmail": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "registeredByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["Pre-Registered", "Activated"] },
+        "activatedUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "activatedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "email",
+        "fullName",
+        "assignedRole",
+        "registeredByEmail",
+        "registeredByUid",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LoginLog": {
+      "title": "LoginLog",
+      "description": "Immutable record of registered user Google Account sign-in and registration events.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authProvider": { "type": "string", "enum": ["google.com"] },
+        "eventType": { "type": "string", "enum": ["REGISTRATION", "LOGIN"] },
+        "role": {
+          "type": "string",
+          "enum": ["Administrator", "Business Owner", "Finance Manager", "Business Analyst", "Read-Only User"]
+        },
+        "loginAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "authProvider", "eventType", "role", "loginAt"]
     },
     "Business": {
       "title": "Business",
@@ -259,7 +326,15 @@
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "User authentication profile and role preferences."
+      "description": "Registered Google user authentication profile, login count, and role preferences."
+    },
+    "/emailRegistrations/{regId}": {
+      "schema": { "$ref": "#/entities/EmailRegistration" },
+      "description": "Registered email IDs authorized to access Nexora via Google Sign-In."
+    },
+    "/loginLogs/{logId}": {
+      "schema": { "$ref": "#/entities/LoginLog" },
+      "description": "Immutable audit history of registered Google user sign-ins."
     },
     "/businesses/{businessId}": {
       "schema": { "$ref": "#/entities/Business" },

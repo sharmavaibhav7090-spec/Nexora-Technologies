@@ -25,7 +25,9 @@ service cloud.firestore {
     }
 
     function isVerified() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.firebase.sign_in_provider == 'google.com';
     }
 
     function isAdminEmail() {
@@ -67,15 +69,68 @@ service cloud.firestore {
     // --- Validation Blueprints ---
 
     function isValidUserProfile(data) {
-      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'activeBusinessId', 'createdAt', 'updatedAt']) &&
+      return data.keys().hasAll([
+          'uid', 'email', 'displayName', 'role',
+          'authProvider', 'registrationStatus', 'registeredAt', 'lastLoginAt', 'loginCount',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'organizationName', 'role',
+          'authProvider', 'registrationStatus', 'registeredAt', 'lastLoginAt', 'loginCount',
+          'activeBusinessId', 'createdAt', 'updatedAt'
+        ]) &&
         isValidId(data.uid) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        (!('organizationName' in data) || (data.organizationName is string && data.organizationName.size() <= 160)) &&
         data.role in ['Administrator', 'Business Owner', 'Finance Manager', 'Business Analyst', 'Read-Only User'] &&
+        data.authProvider == 'google.com' &&
+        data.registrationStatus in ['Registered', 'Suspended'] &&
+        data.registeredAt is timestamp &&
+        data.lastLoginAt is timestamp &&
+        data.loginCount is int && data.loginCount >= 1 &&
         (!('activeBusinessId' in data) || (data.activeBusinessId is string && data.activeBusinessId.size() <= 128)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
+    }
+
+    function isValidEmailRegistration(data) {
+      return data.keys().hasAll([
+          'email', 'fullName', 'assignedRole',
+          'registeredByEmail', 'registeredByUid', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'email', 'fullName', 'organizationName', 'assignedRole',
+          'registeredByEmail', 'registeredByUid', 'status', 'activatedUid', 'activatedAt',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        (!('organizationName' in data) || (data.organizationName is string && data.organizationName.size() <= 160)) &&
+        data.assignedRole in ['Business Owner', 'Finance Manager', 'Business Analyst', 'Read-Only User'] &&
+        data.registeredByEmail is string && data.registeredByEmail.size() >= 3 && data.registeredByEmail.size() <= 254 &&
+        isValidId(data.registeredByUid) &&
+        data.status in ['Pre-Registered', 'Activated'] &&
+        (!('activatedUid' in data) || isValidId(data.activatedUid)) &&
+        (!('activatedAt' in data) || data.activatedAt is timestamp) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLoginLog(data) {
+      return data.keys().hasAll([
+          'uid', 'email', 'displayName', 'authProvider', 'eventType', 'role', 'loginAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'authProvider', 'eventType', 'role', 'loginAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.authProvider == 'google.com' &&
+        data.eventType in ['REGISTRATION', 'LOGIN'] &&
+        data.role in ['Administrator', 'Business Owner', 'Finance Manager', 'Business Analyst', 'Read-Only User'] &&
+        data.loginAt is timestamp;
     }
 
     function isValidBusiness(data) {
@@ -278,23 +333,98 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow get: if isValidId(userId) && isSignedIn() && (isOwner(userId) || isAdmin());
-      allow list: if isAdminEmail();
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdminEmail());
       allow create: if isVerified() && isValidId(userId) && isOwner(userId) &&
         isValidUserProfile(incoming()) &&
         incoming().uid == request.auth.uid &&
+        incoming().email.lower() == request.auth.token.email.lower() &&
+        incoming().registrationStatus == 'Registered' &&
+        incoming().loginCount == 1 &&
+        incoming().registeredAt == request.time &&
+        incoming().lastLoginAt == request.time &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         (incoming().role == 'Business Owner' || isAdminEmail());
       allow update: if isVerified() && isValidId(userId) &&
         isValidUserProfile(incoming()) &&
         incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          (isOwner(userId) && incoming().role == existing().role &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'activeBusinessId', 'updatedAt']))
+          (isOwner(userId) && !('registeredAt' in existing()) &&
+            incoming().role == existing().role &&
+            incoming().registeredAt == existing().createdAt &&
+            incoming().lastLoginAt == request.time &&
+            incoming().loginCount == 1 &&
+            incoming().registrationStatus == 'Registered' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['authProvider', 'registrationStatus', 'organizationName', 'registeredAt', 'lastLoginAt', 'loginCount', 'displayName', 'updatedAt'])) ||
+          (isOwner(userId) && 'registeredAt' in existing() &&
+            incoming().registeredAt == existing().registeredAt &&
+            incoming().authProvider == existing().authProvider &&
+            incoming().role == existing().role &&
+            existing().registrationStatus == 'Registered' &&
+            incoming().registrationStatus == 'Registered' &&
+            incoming().lastLoginAt == request.time &&
+            incoming().loginCount == existing().loginCount + 1 &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'loginCount', 'displayName', 'updatedAt'])) ||
+          (isOwner(userId) && 'registeredAt' in existing() &&
+            incoming().registeredAt == existing().registeredAt &&
+            incoming().authProvider == existing().authProvider &&
+            incoming().role == existing().role &&
+            incoming().registrationStatus == existing().registrationStatus &&
+            incoming().lastLoginAt == existing().lastLoginAt &&
+            incoming().loginCount == existing().loginCount &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'organizationName', 'activeBusinessId', 'updatedAt']))
         );
       allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    match /emailRegistrations/{regId} {
+      allow get: if isValidId(regId) && isVerified() && (resource == null || existing().email.lower() == request.auth.token.email.lower() || isAdmin());
+      allow list: if isVerified() && (resource.data.email == request.auth.token.email || isAdminEmail());
+      allow create: if isVerified() && isValidId(regId) &&
+        isValidEmailRegistration(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (incoming().email.lower() == request.auth.token.email.lower() &&
+            incoming().registeredByUid == request.auth.uid &&
+            incoming().registeredByEmail.lower() == request.auth.token.email.lower() &&
+            incoming().assignedRole == 'Business Owner' &&
+            incoming().status == 'Activated' &&
+            'activatedUid' in incoming() && incoming().activatedUid == request.auth.uid &&
+            'activatedAt' in incoming() && incoming().activatedAt == request.time)
+        );
+      allow update: if isVerified() && isValidId(regId) &&
+        isValidEmailRegistration(incoming()) &&
+        incoming().email == existing().email &&
+        incoming().registeredByUid == existing().registeredByUid &&
+        incoming().registeredByEmail == existing().registeredByEmail &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (existing().email.lower() == request.auth.token.email.lower() &&
+            existing().status == 'Pre-Registered' &&
+            incoming().status == 'Activated' &&
+            incoming().assignedRole == existing().assignedRole &&
+            incoming().fullName == existing().fullName &&
+            'activatedUid' in incoming() && incoming().activatedUid == request.auth.uid &&
+            'activatedAt' in incoming() && incoming().activatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activatedUid', 'activatedAt', 'updatedAt']))
+        );
+      allow delete: if isAdmin() && isValidId(regId);
+    }
+
+    match /loginLogs/{logId} {
+      allow get: if isValidId(logId) && isSignedIn() && (resource == null || existing().uid == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isAdminEmail());
+      allow create: if isVerified() && isValidId(logId) &&
+        isValidLoginLog(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().email.lower() == request.auth.token.email.lower() &&
+        incoming().loginAt == request.time;
+      allow update, delete: if false;
     }
 
     match /businesses/{businessId} {

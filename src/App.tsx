@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import {
   BarChart3,
@@ -18,11 +18,12 @@ import {
   ShieldAlert,
   Sparkles,
   TrendingUp,
+  UserPlus,
   Users,
   Wallet,
   X,
 } from 'lucide-react';
-import { auth, googleProvider } from './firebase';
+import { auth, googleProvider, isGoogleAuthenticated } from './firebase';
 import {
   AIInsightRecord,
   AuditLogRecord,
@@ -31,7 +32,9 @@ import {
   CustomerParty,
   DashboardFilters,
   DatasetRecord,
+  EmailRegistration,
   LedgerAccount,
+  LoginLogRecord,
   NavModuleId,
   RiskRecord,
   SubscriptionRecord,
@@ -40,11 +43,17 @@ import {
   UserRole,
 } from './types/nexora';
 import {
+  ADMIN_EMAIL,
   createBusinessProfile,
-  ensureUserProfile,
+  findEmailRegistration,
+  getUserProfile,
+  registerAndRecordGoogleLogin,
   seedSampleBusiness,
   subscribeBusinessCollection,
   subscribeBusinesses,
+  subscribeEmailRegistrations,
+  subscribeLoginLogs,
+  subscribeRegisteredUsers,
   updateUserActiveBusiness,
 } from './services/firestoreService';
 import { computeFinancialModel } from './utils/financialEngine';
@@ -92,6 +101,24 @@ function NexoraWorkspace() {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<'signin' | 'register'>('signin');
+  const [regEmail, setRegEmail] = useState('');
+  const [regFullName, setRegFullName] = useState('');
+  const [regOrgName, setRegOrgName] = useState('');
+  const [needsRegistrationCompletion, setNeedsRegistrationCompletion] = useState(false);
+  const [completingRegistration, setCompletingRegistration] = useState(false);
+
+  const pendingRegistrationRef = useRef<{
+    expectedEmail: string;
+    fullName: string;
+    organizationName: string;
+  } | null>(null);
+  const recordedUidRef = useRef<string | null>(null);
+
+  const [registeredUsers, setRegisteredUsers] = useState<UserProfile[]>([]);
+  const [emailRegistrations, setEmailRegistrations] = useState<EmailRegistration[]>([]);
+  const [loginLogs, setLoginLogs] = useState<LoginLogRecord[]>([]);
 
   const [businesses, setBusinesses] = useState<BusinessProfile[]>([]);
   const [businessesLoaded, setBusinessesLoaded] = useState(false);
@@ -126,40 +153,110 @@ function NexoraWorkspace() {
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      if (firebaseUser) {
-        try {
-          const prof = await ensureUserProfile(firebaseUser);
-          setUserProfile(prof);
-          if (prof.activeBusinessId) {
-            setActiveBusinessId(prof.activeBusinessId);
-          }
-        } catch (err) {
-          setAuthError(err instanceof Error ? err.message : 'Unable to load user profile.');
-        }
-      } else {
+      if (!firebaseUser) {
+        recordedUidRef.current = null;
+        setUser(null);
         setUserProfile(null);
+        setNeedsRegistrationCompletion(false);
+        setRegisteredUsers([]);
+        setEmailRegistrations([]);
+        setLoginLogs([]);
         setBusinesses([]);
         setBusinessesLoaded(false);
         setActiveBusinessId('');
+        setAuthReady(true);
+        return;
       }
+
+      // Enforce Google Account Authentication Only
+      if (!isGoogleAuthenticated(firebaseUser) || !firebaseUser.email) {
+        pendingRegistrationRef.current = null;
+        await signOut(auth);
+        setAuthError('Only verified Google Account logins are permitted on Nexora Technologies.');
+        setAuthReady(true);
+        return;
+      }
+
+      const normalizedGoogleEmail = firebaseUser.email.trim().toLowerCase();
+      const pendingReg = pendingRegistrationRef.current;
+
+      if (pendingReg && pendingReg.expectedEmail !== normalizedGoogleEmail) {
+        pendingRegistrationRef.current = null;
+        await signOut(auth);
+        setAuthError(
+          `Selected Google account (${normalizedGoogleEmail}) does not match the email ID you entered (${pendingReg.expectedEmail}). Please sign in with the matching Google account.`
+        );
+        setAuthReady(true);
+        return;
+      }
+
+      setUser(firebaseUser);
+
+      try {
+        if (pendingReg) {
+          pendingRegistrationRef.current = null;
+          recordedUidRef.current = firebaseUser.uid;
+          const prof = await registerAndRecordGoogleLogin(firebaseUser, {
+            fullName: pendingReg.fullName,
+            organizationName: pendingReg.organizationName,
+          });
+          setUserProfile(prof);
+          setNeedsRegistrationCompletion(false);
+          if (prof.activeBusinessId) {
+            setActiveBusinessId(prof.activeBusinessId);
+          }
+        } else {
+          const existingProfile = await getUserProfile(firebaseUser.uid);
+          const preReg = await findEmailRegistration(normalizedGoogleEmail);
+
+          if (!existingProfile && !preReg && normalizedGoogleEmail !== ADMIN_EMAIL) {
+            // Require explicit email registration confirmation before entering workspace
+            setRegFullName(firebaseUser.displayName || normalizedGoogleEmail.split('@')[0]);
+            setNeedsRegistrationCompletion(true);
+            setUserProfile(null);
+          } else if (recordedUidRef.current !== firebaseUser.uid) {
+            recordedUidRef.current = firebaseUser.uid;
+            const prof = await registerAndRecordGoogleLogin(firebaseUser);
+            setUserProfile(prof);
+            setNeedsRegistrationCompletion(false);
+            if (prof.activeBusinessId) {
+              setActiveBusinessId(prof.activeBusinessId);
+            }
+          } else if (existingProfile) {
+            setUserProfile(existingProfile);
+            setNeedsRegistrationCompletion(false);
+          }
+        }
+      } catch (err) {
+        setAuthError(err instanceof Error ? err.message : 'Unable to verify Google registration profile.');
+      }
+
       setAuthReady(true);
     });
     return () => unsub();
   }, []);
 
+  const isPlatformAdmin = (user?.email || '').trim().toLowerCase() === ADMIN_EMAIL;
+
   useEffect(() => {
-    if (!user) return;
-    const unsub = subscribeBusinesses(user.uid, (list) => {
-      setBusinesses(list);
-      setBusinessesLoaded(true);
-      setActiveBusinessId((prev) => {
-        if (prev && list.some((b) => b.id === prev)) return prev;
-        return list[0]?.id ?? '';
-      });
-    });
-    return () => unsub();
-  }, [user]);
+    if (!user || !userProfile) return;
+    const unsubs = [
+      subscribeBusinesses(user.uid, (list) => {
+        setBusinesses(list);
+        setBusinessesLoaded(true);
+        setActiveBusinessId((prev) => {
+          if (prev && list.some((b) => b.id === prev)) return prev;
+          return list[0]?.id ?? '';
+        });
+      }),
+      subscribeRegisteredUsers(user, isPlatformAdmin, setRegisteredUsers),
+      subscribeEmailRegistrations(user, isPlatformAdmin, setEmailRegistrations),
+      subscribeLoginLogs(user, isPlatformAdmin, setLoginLogs),
+    ];
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [user, userProfile, isPlatformAdmin]);
 
   const activeBusiness = useMemo(
     () => businesses.find((b) => b.id === activeBusinessId) ?? businesses[0] ?? null,
@@ -228,10 +325,69 @@ function NexoraWorkspace() {
 
   const handleSignIn = async () => {
     setAuthError(null);
+    setAuthNotice(null);
+    pendingRegistrationRef.current = null;
+    googleProvider.setCustomParameters({ prompt: 'select_account' });
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Sign-in cancelled or failed.');
+      setAuthError(err instanceof Error ? err.message : 'Google sign-in was cancelled or failed.');
+    }
+  };
+
+  const handleRegisterAndGoogleSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthNotice(null);
+    const normalizedEmail = regEmail.trim().toLowerCase();
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      setAuthError('Please enter a valid Google or Google Workspace email ID.');
+      return;
+    }
+    if (!regFullName.trim()) {
+      setAuthError('Please enter your full name to register.');
+      return;
+    }
+
+    pendingRegistrationRef.current = {
+      expectedEmail: normalizedEmail,
+      fullName: regFullName.trim(),
+      organizationName: regOrgName.trim(),
+    };
+    googleProvider.setCustomParameters({
+      prompt: 'select_account',
+      login_hint: normalizedEmail,
+    });
+
+    try {
+      await signInWithPopup(auth, googleProvider);
+      setAuthNotice(`Registered ${normalizedEmail} and recorded login.`);
+    } catch (err) {
+      pendingRegistrationRef.current = null;
+      setAuthError(err instanceof Error ? err.message : 'Google account verification cancelled or failed.');
+    }
+  };
+
+  const handleCompleteRegistration = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    setCompletingRegistration(true);
+    setAuthError(null);
+    try {
+      recordedUidRef.current = user.uid;
+      const prof = await registerAndRecordGoogleLogin(user, {
+        fullName: regFullName.trim() || user.displayName || undefined,
+        organizationName: regOrgName.trim() || undefined,
+      });
+      setUserProfile(prof);
+      setNeedsRegistrationCompletion(false);
+      if (prof.activeBusinessId) {
+        setActiveBusinessId(prof.activeBusinessId);
+      }
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Failed to complete email registration.');
+    } finally {
+      setCompletingRegistration(false);
     }
   };
 
@@ -301,17 +457,26 @@ function NexoraWorkspace() {
             <span>Budget & Risk</span>
             <span>AI Insights & SQL</span>
           </nav>
-          <button
-            type="button"
-            onClick={handleSignIn}
-            className="px-4 py-2 text-xs font-medium text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] whitespace-nowrap shrink-0"
-          >
-            Sign In with Google
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setAuthMode('register')}
+              className="px-3.5 py-2 text-xs font-medium text-slate-700 border border-slate-200 bg-white rounded-md hover:bg-slate-50 whitespace-nowrap shrink-0"
+            >
+              Register Email ID
+            </button>
+            <button
+              type="button"
+              onClick={handleSignIn}
+              className="px-4 py-2 text-xs font-medium text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] whitespace-nowrap shrink-0"
+            >
+              Sign In with Google
+            </button>
+          </div>
         </header>
 
-        <main className="max-w-5xl mx-auto px-6 py-16 grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
-          <div className="space-y-5">
+        <main className="max-w-5xl mx-auto px-6 py-12 grid grid-cols-1 lg:grid-cols-12 gap-10 items-start w-full">
+          <div className="lg:col-span-7 space-y-5">
             <div className="text-xs font-semibold text-blue-700 tracking-wide uppercase">
               AI-Powered Financial & Business Analytics
             </div>
@@ -321,52 +486,239 @@ function NexoraWorkspace() {
             <p className="text-sm text-slate-600 leading-relaxed">
               Built for Indian SMEs, startups, accountants, and finance teams. Turn raw Excel, CSV, and daily ledger transactions into Profit & Loss statements, balanced Balance Sheets, Cash Flow runways, 15 financial ratios, and AI-assisted executive recommendations.
             </p>
+            <div className="text-xs text-slate-500">
+              Google Account Login Only · Email ID Registry · INR (₹) · April–March FY
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-3 pt-4">
+              <h2 className="text-xs font-semibold text-slate-900 uppercase tracking-wide">
+                Included Financial Intelligence Modules
+              </h2>
+              <div className="grid grid-cols-2 gap-2.5 text-xs">
+                {[
+                  'Executive KPI Dashboard',
+                  'Excel / CSV Validation',
+                  'Accrual vs Cash Ledger',
+                  'P&L, Balance Sheet & Cash Flow',
+                  '15 Automated Financial Ratios',
+                  'Working Capital & Runway',
+                  'Budget vs Actual & Forecasts',
+                  '5×5 Risk Register Matrix',
+                  'AI Insights & SQL Studio',
+                  'Excel & PDF Management Reports',
+                ].map((item) => (
+                  <div key={item} className="py-1.5 px-2.5 bg-slate-50 border border-slate-100 rounded-md text-slate-700">
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-5 bg-white border border-slate-200 rounded-lg p-6 space-y-5">
+            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('signin');
+                  setAuthError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-semibold rounded-xs transition-colors ${
+                  authMode === 'signin' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Google Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-semibold rounded-xs transition-colors ${
+                  authMode === 'register' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Register Email ID
+              </button>
+            </div>
+
             {authError && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-md text-xs text-red-800">
                 {authError}
               </div>
             )}
-            <div className="flex flex-wrap items-center gap-3 pt-2">
-              <button
-                type="button"
-                onClick={handleSignIn}
-                className="px-5 py-2.5 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 whitespace-nowrap shrink-0"
-              >
-                Access Workspace with Google
-              </button>
-              <span className="text-xs text-slate-500">
-                INR (₹) · April–March FY · Multi-Business Isolation
-              </span>
-            </div>
-          </div>
+            {authNotice && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md text-xs text-emerald-800">
+                {authNotice}
+              </div>
+            )}
 
-          <div className="bg-white border border-slate-200 rounded-lg p-6 space-y-4">
-            <h2 className="text-sm font-semibold text-slate-900">Included Financial Intelligence Modules</h2>
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              {[
-                'Executive KPI Dashboard',
-                'Excel / CSV Validation',
-                'Accrual vs Cash Ledger',
-                'P&L, Balance Sheet & Cash Flow',
-                '15 Automated Financial Ratios',
-                'Working Capital & Runway',
-                'Budget vs Actual & Forecasts',
-                '5×5 Risk Register Matrix',
-                'AI Insights & SQL Studio',
-                'Excel & PDF Management Reports',
-              ].map((item) => (
-                <div key={item} className="py-2 px-3 bg-slate-50 border border-slate-100 rounded-md text-slate-700">
-                  {item}
+            {authMode === 'signin' ? (
+              <div className="space-y-4">
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900">Sign In with Google Account</h2>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    Access to Nexora Technologies is restricted exclusively to verified Google Accounts. Every sign-in is recorded in the registered user login ledger.
+                  </p>
                 </div>
-              ))}
-            </div>
+                <button
+                  type="button"
+                  onClick={handleSignIn}
+                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 flex items-center justify-center gap-2 whitespace-nowrap"
+                >
+                  <span>Continue with Google Account</span>
+                </button>
+                <div className="pt-2 border-t border-slate-100 text-xs text-slate-600 flex items-center justify-between">
+                  <span>First time visiting Nexora?</span>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode('register')}
+                    className="font-semibold text-blue-700 hover:text-blue-800"
+                  >
+                    Register Email ID
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleRegisterAndGoogleSignIn} className="space-y-3.5">
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
+                    <UserPlus className="w-4 h-4 text-blue-700" />
+                    <span>Register Email ID for Site Access</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    Enter your Google or Google Workspace email ID to register for Nexora. You will verify ownership via Google Sign-In in the next step.
+                  </p>
+                </div>
+
+                <label className="block text-xs">
+                  <span className="font-medium text-slate-700">Google Email ID *</span>
+                  <input
+                    type="email"
+                    required
+                    value={regEmail}
+                    onChange={(e) => setRegEmail(e.target.value)}
+                    placeholder="name@company.com or name@gmail.com"
+                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600"
+                  />
+                </label>
+
+                <label className="block text-xs">
+                  <span className="font-medium text-slate-700">Full Name *</span>
+                  <input
+                    type="text"
+                    required
+                    value={regFullName}
+                    onChange={(e) => setRegFullName(e.target.value)}
+                    placeholder="e.g. Aarav Sharma"
+                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600"
+                  />
+                </label>
+
+                <label className="block text-xs">
+                  <span className="font-medium text-slate-700">Company / Organization (Optional)</span>
+                  <input
+                    type="text"
+                    value={regOrgName}
+                    onChange={(e) => setRegOrgName(e.target.value)}
+                    placeholder="e.g. Precision Components Pvt. Ltd."
+                    className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:outline-none focus:border-blue-600"
+                  />
+                </label>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#0B1B3B] rounded-md hover:bg-[#132954] whitespace-nowrap"
+                >
+                  Register Email & Verify with Google
+                </button>
+              </form>
+            )}
           </div>
         </main>
 
         <footer className="border-t border-slate-200 bg-white px-6 py-4 text-xs text-slate-500 flex items-center justify-between">
           <span>Nexora Technologies · Turn Raw Data Into Financial Clarity</span>
-          <span>Default Currency: INR (₹) · FY Apr–Mar</span>
+          <span>Google OAuth Only · Default Currency: INR (₹) · FY Apr–Mar</span>
         </footer>
+      </div>
+    );
+  }
+
+  if (needsRegistrationCompletion) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <form
+          onSubmit={handleCompleteRegistration}
+          className="max-w-md w-full bg-white border border-slate-200 rounded-lg p-7 space-y-5"
+        >
+          <div className="border-b border-slate-100 pb-4 flex items-start justify-between gap-4">
+            <div>
+              <h1 className="text-base font-bold text-slate-900">Complete Email ID Registration</h1>
+              <p className="text-xs text-slate-500 mt-1">
+                Verified Google Account: <span className="font-medium text-slate-800">{user.email}</span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => signOut(auth)}
+              className="text-xs text-slate-500 hover:text-slate-800 whitespace-nowrap shrink-0"
+            >
+              Switch Account
+            </button>
+          </div>
+
+          {authError && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-md text-xs text-red-800">
+              {authError}
+            </div>
+          )}
+
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Your Google email ID is not yet listed in Nexora’s registered users directory. Confirm your details below to register your email ID and record your login.
+          </p>
+
+          <label className="block text-xs">
+            <span className="font-medium text-slate-700">Registered Email ID</span>
+            <input
+              type="email"
+              disabled
+              value={user.email || ''}
+              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md bg-slate-50 text-slate-600"
+            />
+          </label>
+
+          <label className="block text-xs">
+            <span className="font-medium text-slate-700">Full Name *</span>
+            <input
+              type="text"
+              required
+              value={regFullName}
+              onChange={(e) => setRegFullName(e.target.value)}
+              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md"
+            />
+          </label>
+
+          <label className="block text-xs">
+            <span className="font-medium text-slate-700">Company / Organization (Optional)</span>
+            <input
+              type="text"
+              value={regOrgName}
+              onChange={(e) => setRegOrgName(e.target.value)}
+              placeholder="e.g. Acme India Pvt. Ltd."
+              className="mt-1 w-full px-3 py-2 text-xs border border-slate-200 rounded-md"
+            />
+          </label>
+
+          <button
+            type="submit"
+            disabled={completingRegistration}
+            className="w-full py-2.5 text-xs font-semibold text-white bg-blue-700 rounded-md hover:bg-blue-800 disabled:opacity-50"
+          >
+            {completingRegistration ? 'Registering Email & Recording Login...' : 'Register Email ID & Enter Workspace'}
+          </button>
+        </form>
       </div>
     );
   }
@@ -687,11 +1039,16 @@ function NexoraWorkspace() {
           )}
           {activeModule === 'settings' && (
             <SettingsView
+              user={user}
               userEmail={user.email || ''}
               actualRole={actualRole}
               effectiveRole={effectiveRole}
               onPreviewRoleChange={setPreviewRole}
               auditLogs={auditLogs}
+              isPlatformAdmin={isPlatformAdmin}
+              registeredUsers={registeredUsers}
+              emailRegistrations={emailRegistrations}
+              loginLogs={loginLogs}
             />
           )}
         </main>
